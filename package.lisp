@@ -6,7 +6,12 @@
    #:nrotate-left 
    #:nrotate-right 
    #:nsync 
+   #:ucopy 
    #:nupdate
    #:bubblesort
-   #:bubblesync))
+   #:bubblesync
+   #:delete-prop
+   #:set-prop
+   #:get-prop
+   #:atomp))
 (in-package :cl-destruction)
