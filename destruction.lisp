@@ -27,16 +27,20 @@
 (defmethod nsync ((source list) (target list) &optional (proc #'identity)) 
   "Sets the contents of TARGET so all cars of TARGET are the cars of SOURCE
 (but not the cons cells themselves)"
-  (loop for sc on source
-        for tc on target
-        with repeat = t
-        while (and repeat sc tc)
-        if (and (null (cdr sc)) (cdr tc)) do
-          (setf (cdr tc) nil repeat nil) else do
+  (let ((tg (or target (list nil))))
+    (loop for sc on source
+          for tc on tg
+          while (and sc tc)
+          if (and (null (cdr sc)) (cdr tc)) do
+            (setf (car tc) (funcall proc (car sc))
+                  (cdr tc) nil)
+            (return tg)
+          else do
             ;; nsync? or...
             (setf (car tc) (funcall proc (car sc)))
-        if (and (cdr sc) (null (cdr tc))) do
-          (nconc tc (cons (ucopy (funcall proc (cadr sc))) nil))))
+          if (and (cdr sc) (null (cdr tc))) do
+            (nconc tc (cons (ucopy (funcall proc (cadr sc))) nil))
+          finally (return tg))))
 
 ;; Old version. Does not nconc new cells, but *appears* to work.
 ;; (defmethod nsync ((source list) (target list) &optional (proc #'identity)) 
@@ -148,20 +152,9 @@
      (typep (class-of item) 'structure-class)
      (typep (class-of item) 'standard-class)))))
 
-
-;; (defmethod nrotate-left ((l list) n &key (from 0 frp) (to (length l) top))
-;;   "Destructively modify l in-place (use setq still), rotating it n places left"
-;;   (let ((x (nthcdr n l))
-;;         (y (nbutlast l (- to n))))
-;;     (setq l (nconc x y)))
-;;   l)
-
-;; (defmethod nrotate-right ((l list) n)
-;;   "Destructively modify l in-place (use setq still), rotating it n places right"
-;;   (nrotate-left l (- (length l) n)))
-
 (defmethod nrotate-left ((l sequence) n &key (from 0) (to (- (length l) 1))) 
-  "Destructively modify l in-place, rotating it n places right"
+  (declare (type integer n from to))
+  "Destructively modify l in-place, rotating it n places left"
   (let ((k (- to from -1)))
     (dotimes (i (gcd k n))
       (let* ((j (+ from (mod i k)))
@@ -174,8 +167,9 @@
         (setf (elt l j) temp))))
   l)
 
-(defmethod nrotate-right ((l sequence) n &key (from 0) (to (- (length l) 1))) 
-  "Destructively modify l in-place, rotating it n places left"
+(defmethod nrotate-right ((l sequence) n &key (from 0) (to (- (length l) 1)))
+  (declare (type integer n from to)) 
+  "Destructively modify l in-place, rotating it n places right"
   (nrotate-left l (- n) :from from :to to)
   l)
 
@@ -218,70 +212,90 @@ Useful for sorting parallel lists without breaking the index link between them f
 
 ;; (defsetf (setf find) (item sequence &rest args &key from-end (start 0) end key test test-not))
 
-(defun get-prop (indicator place &key (default nil) (identity #'cadr) (test #'eq) from-end (start 0) end) 
-  (declare (type list place)
-           (type function identity test)
-           (type integer start))
-  (if from-end (setq place (nreverse place)
-                     start (- (length place) end)
-                     end (- (length place) start))) 
-  (let ((result
-          (loop for p on place by #'cddr
-                for i from 0
-                ;; if (atom (cdr p))
-                ;;   do (error 'simple-type-error
-                ;;             :format-control "malformed property list: ~S."
-                ;;             :format-arguments (list place)
-                ;;             :datum (cdr p)
-                ;;             :expected-type 'cons) 
-                ;; else
-                if (and (< (- start 1) i (if end end (1+ i)))
-                        (funcall test indicator (car p)))
-                  do (return (values (funcall identity p) t))
-                finally (return (values default nil)))))
-    (if from-end (setq place (nreverse place)))
-    result))
+;; (defun get-prop (indicator place &key (default nil) (identity #'cadr) (test #'eq) from-end (start 0) end) 
+;;   (declare (type list place)
+;;            (type function identity test)
+;;            (type integer start))
+;;   (if from-end (setq place (nreverse place)
+;;                      start (- (length place) end)
+;;                      end (- (length place) start))) 
+;;   (let ((result
+;;           (loop for p on place by #'cddr
+;;                 for i from 0
+;;                 ;; if (atom (cdr p))
+;;                 ;;   do (error 'simple-type-error
+;;                 ;;             :format-control "malformed property list: ~S."
+;;                 ;;             :format-arguments (list place)
+;;                 ;;             :datum (cdr p)
+;;                 ;;             :expected-type 'cons) 
+;;                 ;; else
+;;                 if (and (< (- start 1) i (if end end (1+ i)))
+;;                         (funcall test indicator (car p)))
+;;                   do (return (values (funcall identity p) t))
+;;                 finally (return (values default nil)))))
+;;     (if from-end (setq place (nreverse place)))
+;;     result))
 
-(defun delete-prop (indicator place &key (default nil) (test #'eq) from-end (start 0) end) 
-  (declare (type list place)
-           (type function test)
-           (type integer start))
-  (if from-end (setq place (nreverse place)
-                     start (- (length place) end)
-                     end (- (length place) start))) 
-  (let ((result
-          (loop for p on place by #'cddr
-                for i from 0
-                with s = 0
-                ;; if (atom (cdr p))
-                ;; do (error 'simple-type-error
-                ;;           :format-control "malformed property list: ~S."
-                ;;           :format-arguments (list place)
-                ;;           :datum (cdr p)
-                ;;           :expected-type 'cons) 
-                ;; else
-                if (and (< (- start 1) i (if end end (1+ i)))
-                        (funcall test indicator (car p)))
-                  do (incf s)
-                     (setf (car p) (caddr p)
-                           (cadr p) (cadddr p))
-                finally (setf place (nbutlast place (* 2 s))))))
-    (if from-end (setq place (nreverse place)))
-    ;; (nbutlast result s)
-    ))
+;; (defun delete-prop (indicator place &key (default nil) (test #'eq) from-end (start 0) end) 
+;;   (declare (type list place)
+;;            (type function test)
+;;            (type integer start))
+;;   (if from-end (setq place (nreverse place)
+;;                      start (- (length place) end)
+;;                      end (- (length place) start))) 
+;;   (let ((result
+;;           (loop for p on place by #'cddr
+;;                 for i from 0
+;;                 with s = 0
+;;                 ;; if (atom (cdr p))
+;;                 ;; do (error 'simple-type-error
+;;                 ;;           :format-control "malformed property list: ~S."
+;;                 ;;           :format-arguments (list place)
+;;                 ;;           :datum (cdr p)
+;;                 ;;           :expected-type 'cons) 
+;;                 ;; else
+;;                 if (and (< (- start 1) i (if end end (1+ i)))
+;;                         (funcall test indicator (car p)))
+;;                   do (incf s)
+;;                      (setf (car p) (caddr p)
+;;                            (cadr p) (cadddr p))
+;;                 finally (setf place (nbutlast place (* 2 s))))))
+;;     (if from-end (setq place (nreverse place)))
+;;     ;; (nbutlast result s)
+;;     ))
 
-;; Setf variant is not possible to write
-;; if defsetf is used, then place will be impossible to change if it is (list)/nil
+;; ;; Setf variant is not possible to write
+;; ;; if defsetf is used, then place will be impossible to change if it is (list)/nil
 
-(defun set-prop (indicator value place &key (test #'eq) from-end (start 0) end)
-  (multiple-value-bind
-        (place success)
-      (get-prop indicator place :test test :from-end from-end :start start :end end :identity #'identity)
-    (if success
-        (setf (car place) value)
-        (progn
-          (push value place)
-          (push indicator place)))))
+;; (defun set-prop (indicator value place &key (test #'eq) from-end (start 0) end)
+;;   (multiple-value-bind
+;;         (place success)
+;;       (get-prop indicator place :test test :from-end from-end :start start :end end :identity #'identity)
+;;     (if success
+;;         (progn (setf (car place) value))
+;;         (progn
+;;           (push value place)
+;;           (push indicator place)))))
+
+(defmethod get-prop (indicator (place sequence) &key default (test #'eq) from-end (start 0) (end (length place)))
+  (loop for i from 0 by 2 repeat (/ (- end start) 2)
+        for idx = (if from-end (- end i 1) (+ start i)) 
+        for el = (elt place idx)
+        if (funcall test indicator el)
+          do (return (values (elt place (1+ idx)) t))
+        finally (return (values default nil))))
+
+(defmethod set-prop (indicator value (place list) &key default (test #'eq) from-end (start 0) (end (length place)))
+  (loop for i from 0 by 2 repeat (/ (- end start) 2)
+        for idx = (if from-end (- end i 1) (+ start i)) 
+        for el = (elt place idx)
+        if (funcall test indicator el)
+          do (setf (elt place (1+ idx)) value)
+             (return (values place t))
+        finally
+           (push value place)
+           (push indicator place)
+           (return (values place nil))))
 
 ;; (defun get-prop (place indicator &key (default nil) (test #'eq) from-end (start 0) end)
 ;;   "Search the property list stored in PLACE for the first INDICATOR.
