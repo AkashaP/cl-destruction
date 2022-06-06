@@ -201,11 +201,13 @@ Useful for sorting parallel lists without breaking the index link between them f
                     (setf (first c1) (second c1)
                           (second c1) tmp))
                   (loop for c2 in h2
-                        do (let ((tmp (first c2)))
-                             (setf (first c2) (second c2)
-                                   (second c2) tmp))))
+                        if (cadr c2)
+                          do (let ((tmp (first c2)))
+                               (setf (first c2) (second c2)
+                                     (second c2) tmp))))
                 (setq h2 (mapcar #'cdr h2)))
-        while swaps))
+        while swaps)
+  (apply #'values lists))
 
 (defun bubblesort (pred list)
   (car (bubblesync pred list)))
@@ -446,68 +448,112 @@ Useful for sorting parallel lists without breaking the index link between them f
 
 ;; Thanks to https://codereview.stackexchange.com/q/156392 davypough
 
-(defmethod ucopy ((sym symbol))
+(defvar *working-space* (make-hash-table))
+(defvar *not-found* (gensym "not-found"))
+(defun %set-instance (k v) (declare (ignore k v)))
+
+(defmacro ucopy (thing working-space)
+  (let ((k (gensym))
+        (v (gensym)))
+    `(let ((*working-space* ,working-space)
+           (%set-instance (lambda (,k ,v)
+                            (setf (gethash ,k *working-space*) ,v))))
+       (declare (special *working-space* %set-instance)
+                (dynamic-extent *working-space* %set-instance))
+       (%ucopy ,thing))))
+
+
+;; (make-hash-table :size (1+ (typecase ,thing
+;;                              (sequence (length ,thing))
+;;                              (hash-table (hash-table-size ,thing))
+;;                              (standard-object (length (closer-mop:class-direct-slots (class-of ,thing))))
+;;                              (structure-object (length (closer-mop:class-direct-slots (class-of ,thing)))))))
+
+
+(defmethod %ucopy ((sym symbol))
   "Simply return the symbol."
   sym)
 
-(defmethod ucopy ((num number))
+(defmethod %ucopy ((num number))
   "Simply return the number."
   num)
 
-(defmethod ucopy ((char character))
+(defmethod %ucopy ((char character))
   "Simply return the character."
   char)
 
-(defmethod ucopy ((fn function))
-  "Simply return the function."
+(defmethod %ucopy ((fn function))
+  "Simply return the function.
+   Note closures are not supported as they are naturally opaque."
   fn)
 
-(defmethod ucopy ((path pathname))
+(defmethod %ucopy ((path pathname))
   "Simply return the path."
   path)
 
-(defmethod ucopy ((seq sequence))
+(defmethod %ucopy ((seq sequence))
   "Copy a sequence recursively."
-  (map (type-of seq) #'ucopy seq))
+  (let ((res (gethash seq *working-space* *not-found*)))
+    (if (eq res *not-found*)
+        (let ((new-seq (map (type-of seq) #'%ucopy seq)))
+          (funcall %set-instance seq new-seq)
+          new-seq) 
+        res)))
 
-(defmethod ucopy ((ht hash-table))
+(defmethod %ucopy ((ht hash-table))
   "Copy a hash table recursively."
-  (loop with new-ht = (make-hash-table
-                       :test (hash-table-test ht)
-                       :size (hash-table-size ht)
-                       :rehash-size (hash-table-rehash-size ht)
-                       :rehash-threshold (hash-table-rehash-threshold ht))
-        for key being the hash-key in ht using (hash-value value)
-        do (setf (gethash (ucopy key) new-ht) (ucopy value))
-        finally (return new-ht)))
+  (let ((res (gethash ht *working-space* *not-found*)))
+    (if (eq res *not-found*)
+        (loop with new-ht = (make-hash-table
+                             :test (hash-table-test ht)
+                             :size (hash-table-size ht)
+                             :rehash-size (hash-table-rehash-size ht)
+                             :rehash-threshold (hash-table-rehash-threshold ht))
+              for key being the hash-key in ht using (hash-value value)
+              do (setf (gethash (%ucopy key) new-ht) (%ucopy value))
+              finally (funcall %set-instance ht new-ht)
+                      (return new-ht))
+        res)))
 
-(defmethod ucopy ((arr array))
+(defmethod %ucopy ((arr array))
   "Copy an array recursively."
-  (let ((new-arr (make-array (array-dimensions arr)
-                             :element-type (array-element-type arr)
-                             :adjustable (adjustable-array-p arr))))
-    (dotimes (i (array-total-size arr))
-      (setf (row-major-aref new-arr i)
-            (ucopy (row-major-aref arr i))))
-    new-arr))
+  (let ((res (gethash arr *working-space* *not-found*)))
+    (if (eq res *not-found*)
+        (let ((new-arr (make-array (array-dimensions arr)
+                                   :element-type (array-element-type arr)
+                                   :adjustable (adjustable-array-p arr))))
+          (dotimes (i (array-total-size arr))
+            (setf (row-major-aref new-arr i)
+                  (%ucopy (row-major-aref arr i))))
+          (funcall %set-instance arr new-arr)
+          new-arr) 
+        res)))
 
-(defmethod ucopy ((struct structure-object))
+(defmethod %ucopy ((struct structure-object))
   "Copy a structure recursively. Might not work in all implementations."
-  (let ((new-struct (copy-structure struct))
-        (slots (closer-mop:class-direct-slots (class-of struct))))
-    (dolist (slot slots)
-      (let ((slot-name (closer-mop:slot-definition-name slot)))
-        (setf (slot-value new-struct slot-name)
-              (ucopy (slot-value struct slot-name)))))
-    new-struct))
+  (let ((res (gethash struct *working-space* *not-found*)))
+    (if (eq res *not-found*)
+        (let ((new-struct (copy-structure struct))
+              (slots (closer-mop:class-direct-slots (class-of struct))))
+          (dolist (slot slots)
+            (let ((slot-name (closer-mop:slot-definition-name slot)))
+              (setf (slot-value new-struct slot-name)
+                    (%ucopy (slot-value struct slot-name)))))
+          (funcall %set-instance struct new-struct)          
+          new-struct) 
+        res)))
 
-(defmethod ucopy ((inst standard-object))
+(defmethod %ucopy ((inst standard-object))
   "Copy an instance of a class recursively. Might not work in all implementations."
-  (let ((new-inst (allocate-instance (class-of inst)))
-        (slots (closer-mop:class-direct-slots (class-of inst))))
-    (dolist (slot slots)
-      (let ((slot-name (closer-mop:slot-definition-name slot)))
-        (when (slot-boundp inst slot-name)
-          (setf (slot-value new-inst slot-name)
-                (ucopy (slot-value inst slot-name))))))
-    new-inst))
+  (let ((res (gethash inst *working-space* *not-found*)))
+    (if (eq res *not-found*)
+        (let ((new-inst (allocate-instance (class-of inst)))
+              (slots (closer-mop:class-direct-slots (class-of inst))))
+          (dolist (slot slots)
+            (let ((slot-name (closer-mop:slot-definition-name slot)))
+              (when (slot-boundp inst slot-name)
+                (setf (slot-value new-inst slot-name)
+                      (%ucopy (slot-value inst slot-name))))))
+          (funcall %set-instance inst new-inst) 
+          new-inst) 
+        res)))
