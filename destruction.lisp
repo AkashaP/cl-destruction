@@ -2,155 +2,8 @@
 
 ;; A very cheaty library that's all to do with avoiding new consing.
 
-;; have to write ucopy first
-;; (defmethod nsync ((source sequence) (target sequence) &optional working-space)
-;;   (if (working-space)
-;;       (let (()))))
-
-;; (defmethod ucopy-seq ((thing list)))
-
-;; (defmethod ucopy-seq ((thing sequence))
-;;   (copy-seq ))
-
-;; (defmethod ucopy ((thing sequence) working-space)
-;;   (let ((copied (copy-seq thing)))
-;;     (loop for i from 0
-;;           do (handler-case
-;;                  (let ((item (elt copied i)))
-;;                    )
-;;                (type-error () (return))))))
-
 (defun make-working-space ()
   (make-hash-table :test #'eq :size 100000000))
-
-;; This one is like the one below it but also conses/trims to match the legnth
-(defmethod nsync ((source list) (target list) &optional (proc #'identity)) 
-  "Sets the contents of TARGET so all cars of TARGET are the cars of SOURCE
-(but not the cons cells themselves)"
-  (let ((tg (or target (list nil))))
-    (loop for sc on source
-          for tc on tg
-          while (and sc tc)
-          if (and (null (cdr sc)) (cdr tc)) do
-            (setf (car tc) (funcall proc (car sc))
-                  (cdr tc) nil)
-            (return tg)
-          else do
-            ;; nsync? or...
-            (setf (car tc) (funcall proc (car sc)))
-          if (and (cdr sc) (null (cdr tc))) do
-            (nconc tc (cons (ucopy (funcall proc (cadr sc))) nil))
-          finally (return tg))))
-
-;; Old version. Does not nconc new cells, but *appears* to work.
-;; (defmethod nsync ((source list) (target list) &optional (proc #'identity)) 
-;;   "Sets the contents of TARGET so all cars of TARGET are the cars of SOURCE
-;; (but not the cons cells themselves)"
-;;   (if (and (null target) (not (null source)))
-;;       (push (funcall proc (car source)) target))
-;;   (loop
-;;     with sc = source
-;;     with tc = target 
-;;     do (if (atomp (car sc)) 
-;;            (setf (car tc) (car sc))
-;;            (nsync (funcall proc (car sc)) (car tc))) 
-;;        (when (null (cdr sc))
-;;          (setf (cdr tc) nil)
-;;          (return target))
-;;        (when (null (cdr tc))
-;;          (setf (cdr tc) (cons (funcall proc (car sc)) nil)))
-;;        (setf sc (cdr sc)
-;;              tc (cdr tc))))
-
-;; Old version
-;; If the cars are also lists then this could entangle the sublists from source onto target, bad!
-;; (defmethod nsync ((source list) (target list) &optional (proc #'identity)) 
-;;   "Sets the contents of TARGET so all cars of TARGET are the cars of SOURCE
-;; (but not the cons cells themselves)"
-;;   (if (and (null target) (not (null source)))
-;;       (push (funcall proc (car source)) target))
-;;   (loop
-;;     with sc = source
-;;     with tc = target 
-;;     do (setf (car tc) (car sc)) 
-;;        (when (null (cdr sc))
-;;          (setf (cdr tc) nil)
-;;          (return target))
-;;        (when (null (cdr tc))
-;;          (setf (cdr tc) (cons (funcall proc (car sc)) nil)))
-;;        (setf sc (cdr sc)
-;;              tc (cdr tc))))
-
-(defmethod nsync ((source vector) (target vector) &optional (proc #'identity))
-  (if (and (adjustable-array-p target)
-           (< (length target) (length source)))
-      (loop for i from (length source) below (length target)
-            do (vector-push-extend (funcall proc (aref source i)) target))
-      (dotimes (x (- (length source) (length target)))
-        (vector-pop target)))
-  (loop
-    for i from 0 below (min (length source) (length target))
-    do (if (atomp (aref source i))
-           (setf (aref target i) (funcall proc (aref source i)))
-           (if (aref target i) 
-               (let ((a (funcall proc (aref source i)))
-                     (b (aref target i)))
-                 ;; (print a)
-                 ;; (print b)
-                 (nsync (funcall proc (aref source i)) (aref target i)))
-               (setf (aref target i) (ucopy (funcall proc (aref source i))))))))
-
-(defmethod nsync ((source hash-table) (target hash-table) &optional (proc #'identity))
-  
-  ;; Delete things in target not part of source
-  (loop
-    with last = nil
-    with lastk = nil
-    for tk being the hash-keys of target
-    if last
-      do (remhash lastk target)
-         (setf last nil lastk nil)
-    if (eq nil (nth-value 1 (gethash tk source)))
-      do (setf last t lastk tk)
-    finally (if last
-                (remhash lastk target)))
-  ;; synchronise target
-  (loop for sk being the hash-keys of source
-          using (hash-value dat)
-        do (if (atomp dat)
-               (setf (gethash sk target) (funcall proc dat))
-               ;; TODO this fails if target is nil
-               (let ((a (funcall proc dat))
-                     (b (gethash sk target)))
-                 ;; (print a)
-                 ;; (print b)
-                 (if (gethash sk target) ; this is like, catching on nil though
-                     (nsync (funcall proc dat) (gethash sk target))
-                     (setf (gethash sk target) (ucopy (funcall proc dat))))))))
-
-(defmethod nsync ((source structure-object) (target structure-object) &optional (proc #'identity))
-  "Copy a structure recursively. Might not work in all implementations."
-  (let ((slots (closer-mop:class-direct-slots (class-of source))))
-    (dolist (slot slots)
-      (let* ((slot-name (closer-mop:slot-definition-name slot))
-             (item (slot-value source slot-name)))
-        (if (atomp item)
-            (setf (slot-value target slot-name)
-                  (funcall proc item))
-            (if (slot-value target slot-name) 
-                (nsync (funcall proc (slot-value source slot-name)) (slot-value target slot-name))
-                (setf (slot-value target slot-name)
-                      (ucopy (funcall proc (slot-value source slot-name))))))))))
-
-(defun atomp (item)
-  (or
-   (eq nil item) 
-   (not
-    (or
-     (hash-table-p item)
-     (typep item 'sequence) 
-     (typep (class-of item) 'structure-class)
-     (typep (class-of item) 'standard-class)))))
 
 (defmethod nrotate-left ((l sequence) n &key (from 0) (to (- (length l) 1))) 
   (declare (type integer n from to))
@@ -172,14 +25,6 @@
   "Destructively modify l in-place, rotating it n places right"
   (nrotate-left l (- n) :from from :to to)
   l)
-
-(defun nupdate (source target) 
-  "Recursively sets the contents of TARGET to match SOURCE, but keeping them separate."
-  (nsync target source
-         (lambda (sc tc)
-           (if (sequencep (car sc))
-               (nupdate sc tc)
-               sc))))
 
 (defun bubblesync (pred &rest lists)
   "A version of bubblesort, that syncs (cdr lists) in the same sorted way as (car lists), destructively.
@@ -212,73 +57,6 @@ Useful for sorting parallel lists without breaking the index link between them f
 (defun bubblesort (pred list)
   (car (bubblesync pred list)))
 
-;; (defsetf (setf find) (item sequence &rest args &key from-end (start 0) end key test test-not))
-
-;; (defun get-prop (indicator place &key (default nil) (identity #'cadr) (test #'eq) from-end (start 0) end) 
-;;   (declare (type list place)
-;;            (type function identity test)
-;;            (type integer start))
-;;   (if from-end (setq place (nreverse place)
-;;                      start (- (length place) end)
-;;                      end (- (length place) start))) 
-;;   (let ((result
-;;           (loop for p on place by #'cddr
-;;                 for i from 0
-;;                 ;; if (atom (cdr p))
-;;                 ;;   do (error 'simple-type-error
-;;                 ;;             :format-control "malformed property list: ~S."
-;;                 ;;             :format-arguments (list place)
-;;                 ;;             :datum (cdr p)
-;;                 ;;             :expected-type 'cons) 
-;;                 ;; else
-;;                 if (and (< (- start 1) i (if end end (1+ i)))
-;;                         (funcall test indicator (car p)))
-;;                   do (return (values (funcall identity p) t))
-;;                 finally (return (values default nil)))))
-;;     (if from-end (setq place (nreverse place)))
-;;     result))
-
-;; (defun delete-prop (indicator place &key (default nil) (test #'eq) from-end (start 0) end) 
-;;   (declare (type list place)
-;;            (type function test)
-;;            (type integer start))
-;;   (if from-end (setq place (nreverse place)
-;;                      start (- (length place) end)
-;;                      end (- (length place) start))) 
-;;   (let ((result
-;;           (loop for p on place by #'cddr
-;;                 for i from 0
-;;                 with s = 0
-;;                 ;; if (atom (cdr p))
-;;                 ;; do (error 'simple-type-error
-;;                 ;;           :format-control "malformed property list: ~S."
-;;                 ;;           :format-arguments (list place)
-;;                 ;;           :datum (cdr p)
-;;                 ;;           :expected-type 'cons) 
-;;                 ;; else
-;;                 if (and (< (- start 1) i (if end end (1+ i)))
-;;                         (funcall test indicator (car p)))
-;;                   do (incf s)
-;;                      (setf (car p) (caddr p)
-;;                            (cadr p) (cadddr p))
-;;                 finally (setf place (nbutlast place (* 2 s))))))
-;;     (if from-end (setq place (nreverse place)))
-;;     ;; (nbutlast result s)
-;;     ))
-
-;; ;; Setf variant is not possible to write
-;; ;; if defsetf is used, then place will be impossible to change if it is (list)/nil
-
-;; (defun set-prop (indicator value place &key (test #'eq) from-end (start 0) end)
-;;   (multiple-value-bind
-;;         (place success)
-;;       (get-prop indicator place :test test :from-end from-end :start start :end end :identity #'identity)
-;;     (if success
-;;         (progn (setf (car place) value))
-;;         (progn
-;;           (push value place)
-;;           (push indicator place)))))
-
 (defmethod get-prop (indicator (place sequence) &key default (test #'eq) from-end (start 0) (end (length place)))
   (loop for i from 0 by 2 repeat (/ (- end start) 2)
         for idx = (if from-end (- end i 1) (+ start i)) 
@@ -299,158 +77,11 @@ Useful for sorting parallel lists without breaking the index link between them f
            (push indicator place)
            (return (values place nil))))
 
-;; (defun get-prop (place indicator &key (default nil) (test #'eq) from-end (start 0) end)
-;;   "Search the property list stored in PLACE for the first INDICATOR.
-;;   If one is found, return the corresponding value, else return DEFAULT."
-;;   (if from-end (setq place (nreverse place)
-;;                      start (- (length place) end)
-;;                      end (- (length place) start)))
-;;   (let ((res (do ((plist place (cddr plist))
-;;                   (i 0 (1+ i)))
-;;                  ((or (null plist)
-;;                       (if end (<= end i))) default)
-;;                (cond
-;;                  ((not (< start i end)))
-;;                  ((atom (cdr plist))
-;;                   (error 'simple-type-error
-;;                          :format-control "malformed property list: ~S."
-;;                          :format-arguments (list place)
-;;                          :datum (cdr plist)
-;;                          :expected-type 'cons))
-;;                  ((funcall test (car plist) indicator)
-;;                   (return (cadr plist)))))))
-;;     (if from-end (setq place (nreverse place))) 
-;;     res))
-
-;; (defsetf get-prop (indicator place &optional &key default (test #'eq) from-end (start 0) (end nil)) (value)
-;;   (let ((p (gensym)))
-;;     `(if (null ,place)
-;;          (setf (getf ,place ,indicator) (push ,place ,value))
-;;          (loop
-;;            initially (if ,from-end (setq ,place (nreverse ,place)))
-;;            for ,p on ,place by #'cddr if (funcall ,test (car ,p) ,indicator)
-;;            do (setf (cadr ,p) ,value)
-;;               (if ,from-end (setq ,place (nreverse place)))
-;;               (return ,place)
-;;            finally (if ,from-end (setq ,place (nreverse place)))
-;;                    (setf (cdr ,place) (cons ,indicator (cdr ,place))
-;;                          (cdr ,place) (cons ,value (cdr ,place)))
-;;                    (if (cddr ,place)
-;;                        (setf (third ,place) (first ,place)
-;;                              (first ,place) ,indicator))
-;;                    (return ,place)))))
-
-;; works.... except when the f***n place is blank. who designed this dumb facility?
-;; (defsetf get-prop (indicator place &optional &key default (test #'eq) from-end (start 0) (end nil)) (value)
-;;   (let ((p (gensym)))
-;;     `(progn
-;;        (setf (getf ,place 2) (cons 1 nil))
-;;        (push ,indicator ,place)
-;;        ,place
-;;        ;; (if (null ,place)
-;;        ;;     (setf (getf ,place ,indicator) (push ,place ,value))
-;;        ;;     (loop
-;;        ;;       initially (if ,from-end (setq ,place (nreverse ,place)))
-;;        ;;       for ,p on ,place by #'cddr if (funcall ,test (car ,p) ,indicator)
-;;        ;;       do (setf (cadr ,p) ,value)
-;;        ;;          (if ,from-end (setq ,place (nreverse place)))
-;;        ;;          (return ,place)
-;;        ;;       finally (if ,from-end (setq ,place (nreverse place)))
-;;        ;;               (setf (cdr ,place) (cons ,indicator (cdr ,place))
-;;        ;;                     (cdr ,place) (cons ,value (cdr ,place)))
-;;        ;;               (if (cddr ,place)
-;;        ;;                   (setf (third ,place) (first ,place)
-;;        ;;                         (first ,place) ,indicator))
-;;        ;;               (return ,place)))
-;;        )))
-
-;; (declaim (inline get-prop))
-;; (defsetf get-prop (indicator place &optional &key default (test #'eq) from-end (start 0) (end nil)) (value)
-;;   (let ((p (gensym)))
-;;     ;; (do ((pl (symbol-plist place) (cddr pl)))
-;;     ;;     ((endp pl)
-
-;;     ;;      value)
-;;     ;;   (cond ((endp (cdr pl))
-;;     ;;          (error "~S has an odd number of items in its property list."
-;;     ;;                 symbol))
-;;     ;;         ((eq (car pl) indicator)
-;;     ;;          (rplaca (cdr pl) value)
-;;     ;;          (return value)))) 
-;;     `(progn
-;;        ;; (setf (getf ,place 2) (cons 1 nil))
-;;        (setf ,place
-;;              ;; (cons 1 (cons 2 (cons ,place)))
-;;              (list* 1 2 a) 
-;;              ;; (setf (symbol-plist ,place)
-;;              ;;       (cons ,indicator (cons ,value (symbol-plist ,place))))
-;;              )
-;;        ;; (do ((pl (symbol-plist ,place) (cddr pl)))
-;;        ;;     ((endp pl)
-;;        ;;      (setf (place-plist ,place)
-;;        ;;            (list* ,indicator ,value (symbol-plist ,place)))
-;;        ;;      value)
-;;        ;;   (cond ((endp (cdr pl))
-;;        ;;          (error "~S has an odd number of items in its property list."
-;;        ;;                 ,place))
-;;        ;;         ((eq (car pl) ,indicator)
-;;        ;;          (rplaca (cdr pl) ,value)
-;;        ;;          (return ,value)))) 
-;;        ;; (push ,indicator ,place)
-;;        ;; ,place
-;;        ;; (if (null ,place)
-;;        ;;     (setf (getf ,place ,indicator) (push ,place ,value))
-;;        ;;     (loop
-;;        ;;       initially (if ,from-end (setq ,place (nreverse ,place)))
-;;        ;;       for ,p on ,place by #'cddr if (funcall ,test (car ,p) ,indicator)
-;;        ;;       do (setf (cadr ,p) ,value)
-;;        ;;          (if ,from-end (setq ,place (nreverse place)))
-;;        ;;          (return ,place)
-;;        ;;       finally (if ,from-end (setq ,place (nreverse place)))
-;;        ;;               (setf (cdr ,place) (cons ,indicator (cdr ,place))
-;;        ;;                     (cdr ,place) (cons ,value (cdr ,place)))
-;;        ;;               (if (cddr ,place)
-;;        ;;                   (setf (third ,place) (first ,place)
-;;        ;;                         (first ,place) ,indicator))
-;;        ;;               (return ,place)))
-;;        )))
-;; ;; (in-package "SB-IMPL")
-;; ;; (define-setf-expander getf1 (place prop &optional default &environment env)
-;; ;;   (multiple-value-bind (place-tempvars place-tempvals stores set get)
-;; ;;       (get-setf-expansion place env)
-;; ;;     (multiple-value-bind (call-tempvars call-tempvals call-args bitmask)
-;; ;;         (collect-setf-temps (list prop default) env '(indicator default))
-;; ;;       (let* ((newval (gensym "NEW")))
-;; ;;         (values `(,@place-tempvars ,@call-tempvars)
-;; ;;                 `(,@place-tempvals ,@call-tempvals) `(,newval)
-;; ;;                 `(let ((,(car stores) (%putf ,get ,(first call-args) ,newval))
-;; ;;                        ,@(cdr stores))
-;; ;;                    ,@(when (logbitp 1 bitmask) (last call-tempvars))
-;; ;;                    ,set
-;; ;;                    ,newval)
-;; ;;                 `(getf ,get ,@call-args))))))
-
-;; (in-package "SB-IMPL")
-;; (define-setf-expander getf1 (prop place &optional default &environment env)
-;;   (multiple-value-bind (place-tempvars place-tempvals stores set get)
-;;       (get-setf-expansion place env)
-;;     (multiple-value-bind (call-tempvars call-tempvals call-args bitmask)
-;;         (collect-setf-temps (list prop default) env '(indicator default))
-;;       (let* ((newval (gensym "NEW")))
-;;         (values `(,@place-tempvars ,@call-tempvars)
-;;                 `(,@place-tempvals ,@call-tempvals) `(,newval)
-;;                 `(let ((,(car stores) (%putf ,get ,(first call-args) ,newval))
-;;                        ,@(cdr stores))
-;;                    ,@(when (logbitp 1 bitmask) (last call-tempvars))
-;;                    ,set
-;;                    ,newval)
-;;                 `(getf ,get ,@call-args))))))
-
-;; Thanks to https://codereview.stackexchange.com/q/156392 davypough
+;; Thanks to https://codereview.stackexchange.com/q/156392 davypough for the base idea
 
 (defvar *working-space* (make-hash-table))
 (defvar *not-found* (gensym "not-found"))
-(defun %set-instance (k v) (declare (ignore k v)))
+(defvar %set-instance (lambda (k v) (declare (ignore k v))))
 
 (defmacro ucopy (thing working-space)
   (let ((k (gensym))
@@ -461,13 +92,6 @@ Useful for sorting parallel lists without breaking the index link between them f
        (declare (special *working-space* %set-instance)
                 (dynamic-extent *working-space* %set-instance))
        (%ucopy ,thing))))
-
-
-;; (make-hash-table :size (1+ (typecase ,thing
-;;                              (sequence (length ,thing))
-;;                              (hash-table (hash-table-size ,thing))
-;;                              (standard-object (length (closer-mop:class-direct-slots (class-of ,thing))))
-;;                              (structure-object (length (closer-mop:class-direct-slots (class-of ,thing)))))))
 
 
 (defmethod %ucopy ((sym symbol))
@@ -496,6 +120,29 @@ Useful for sorting parallel lists without breaking the index link between them f
   (let ((res (gethash seq *working-space* *not-found*)))
     (if (eq res *not-found*)
         (let ((new-seq (map (type-of seq) #'%ucopy seq)))
+          (funcall %set-instance seq new-seq)
+          new-seq) 
+        res)))
+
+(defmethod %ucopy ((seq list))
+  "Copy a list recursively."
+  (let ((res (gethash seq *working-space* *not-found*)))
+    (if (eq res *not-found*)
+        (let ((new-seq
+                ;; this handles improper lists too
+                (if (listp (cdr seq))
+                    (loop with s = seq
+                          while s
+                          if (endp s)
+                            do (loop-finish)
+                          else if (not (listp (cdr s)))
+                                 collect (cons (%ucopy (car s))
+                                               (%ucopy (cdr s)))
+                                 and do (loop-finish)
+                          else collect (%ucopy (car s))
+                               and do (setf s (cdr s)))
+                    (cons (%ucopy (car seq))
+                          (%ucopy (cdr seq))))))
           (funcall %set-instance seq new-seq)
           new-seq) 
         res)))
